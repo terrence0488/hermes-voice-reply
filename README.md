@@ -14,6 +14,8 @@ Hermes hands the model a voice note as a plain quoted transcript, so the model c
 | `pre_gateway_dispatch` | Sees the real message type, and notes a voice note from that person, in a direct message |
 | `pre_llm_call` | On that turn only, adds the instruction next to the message |
 | `pre_tool_call` | On that turn, refuses a script with code, tables, JSON, HTML, URLs, file paths, markdown or over 110 words, so the model rewrites it |
+| `pre_tool_call`, always | Replaces any `model` or `voice` the model chose in `fish_speak` with your `tts.fish-audio` settings, unless your message named that value. Models copy these from memory, which can bill a paid model or use an old voice |
+| `pre_tool_call`, typed turns | Refuses speech unless the message asks for it (`voice`, `say`, `speak`, `aloud`...), because models copy voice replies from earlier in the chat |
 | `post_tool_call` | Records the audio file the tool made |
 | `transform_llm_output` | If no real audio exists, removes any made-up `MEDIA:` line and makes the audio itself |
 
@@ -35,6 +37,7 @@ Restart the gateway.
 
 - **Direct messages only.** Voice notes in groups are ignored.
 - **The fallback sounds plainer** than a script the model wrote, because no one wrote it for speech.
+- **Asking for voice is a word match.** A typed message with `say` in it, such as "what did he say", is allowed to use voice.
 - **The guard catches shapes, not meaning.** A long spoken list in plain sentences under 110 words passes.
 - **The flag matches by person, not message.** If someone sends a voice note and a typed message close together, the first turn to start takes it.
 - **It calls `fish_speak` by name,** so it depends on the Fish Audio plugin's tool.

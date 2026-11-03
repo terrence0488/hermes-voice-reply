@@ -12,6 +12,7 @@ log = logging.getLogger("voice_reply")
 
 PENDING_TTL_SECONDS = 600
 TURN_TTL_SECONDS = 1800
+VOICE_SESSION_TTL_SECONDS = 86400
 MAX_TRACKED = 200
 SPEECH_TOOLS = {"fish_speak", "text_to_speech"}
 FALLBACK_SIMPLE_MAX_CHARS = 400
@@ -26,12 +27,16 @@ Simple answer: everything is in the voice, plus one short caption line and the `
 Complex answer, with a table, code, data, steps or links: put that detail in the text. The voice gives the gist and says the detail is in the text.
 
 Call `fish_speak` once.]"""
+TYPED_REMINDER = "[The user typed this message. Reply in text only, even though earlier replies in this chat were voice. Don't mention this note.]"
+TYPED_BLOCK = "The user typed this message, so reply in text. Use voice only when they ask for it."
+ASKED_FOR_SPEECH = re.compile(r"\b(?:voice|speak|say|aloud|audio|tts|pronounce|narrate|sing)\b", re.I)
 
 _MEDIA = re.compile(r"MEDIA:([^\s\"'\\]+)")
 _MEDIA_LINE = re.compile(r"^[ \t]*(?:\[\[audio_as_voice\]\][ \t]*)?MEDIA:(\S+)[ \t]*$", re.M)
 _lock = threading.Lock()
 _pending = {}  # (platform, user id) -> [times voice notes arrived]
 _turns = {}  # session or task id -> turn record
+_voice_sessions = {}  # session id -> when it last had a voice turn
 
 
 def _name(value):
@@ -48,6 +53,8 @@ def _prune(now):
         del _pending[key]
     for key in [k for k, turn in _turns.items() if now - turn["at"] >= TURN_TTL_SECONDS]:
         del _turns[key]
+    for key in [k for k, when in _voice_sessions.items() if now - when >= VOICE_SESSION_TTL_SECONDS]:
+        del _voice_sessions[key]
 
 
 def on_pre_gateway_dispatch(event=None, **kwargs):
@@ -69,26 +76,34 @@ def on_pre_gateway_dispatch(event=None, **kwargs):
     return None
 
 
-def on_pre_llm_call(session_id="", task_id="", platform="", sender_id="", **kwargs):
+def on_pre_llm_call(session_id="", task_id="", platform="", sender_id="", user_message="", **kwargs):
     try:
+        if not sender_id:
+            return None  # CLI, dashboard and scheduled turns have no person to answer in voice.
         now = time.monotonic()
         key = (_name(platform), str(sender_id))
+        message = user_message if isinstance(user_message, str) else ""
         with _lock:
             _prune(now)
             times = [t for t in _pending.get(key, []) if now - t < PENDING_TTL_SECONDS]
-            if not times:
-                return None
-            times.pop(0)
-            if times:
-                _pending[key] = times
-            else:
-                _pending.pop(key, None)
-            turn = {"at": now, "audio": []}
+            voice = bool(times)
+            if voice:
+                times.pop(0)
+                if times:
+                    _pending[key] = times
+                else:
+                    _pending.pop(key, None)
+            turn = {"at": now, "audio": [], "voice": voice, "message": message}
             for turn_key in {session_id, task_id} - {"", None}:
                 _turns[turn_key] = turn
-        return {"context": INSTRUCTION}
+            if voice:
+                _voice_sessions[session_id] = now
+                return {"context": INSTRUCTION}
+            if session_id in _voice_sessions and not ASKED_FOR_SPEECH.search(message):
+                return {"context": TYPED_REMINDER}
+        return None
     except Exception:
-        log.exception("could not start a voice turn")
+        log.exception("could not start a turn")
         return None
 
 
@@ -108,17 +123,53 @@ def _speech_calls(tool_name, args):
     return []
 
 
+def _configured_speech():
+    """The owner's chosen Fish Audio model and voice, or an empty dict."""
+    from hermes_cli.config import load_config
+    settings = (load_config().get("tts") or {}).get("fish-audio") or {}
+    return {k: settings[k] for k in ("model", "voice") if isinstance(settings.get(k), str) and settings[k]}
+
+
+def _pinned(call, message):
+    """A fish_speak call with the configured model and voice, unless this message named others itself."""
+    wanted = {k: v for k, v in _configured_speech().items() if call.get(k) and call[k] != v and call[k] not in message}
+    return {**call, **wanted} if wanted else None
+
+
+def _pin_arguments(tool_name, args, message):
+    """A `modify` directive that applies the owner's model and voice, or None when nothing changes."""
+    if tool_name == "fish_speak" and isinstance(args, dict):
+        fixed = _pinned(args, message)
+        return {"action": "modify", "args": fixed} if fixed else None
+    if tool_name == "tool_call" and isinstance(args, dict) and isinstance(args.get("calls"), list):
+        calls, changed = [], False
+        for call in args["calls"]:
+            fixed = None
+            if isinstance(call, dict) and call.get("name") == "fish_speak" and isinstance(call.get("arguments"), dict):
+                fixed = _pinned(call["arguments"], message)
+            calls.append({**call, "arguments": fixed} if fixed else call)
+            changed = changed or bool(fixed)
+        return {"action": "modify", "args": {"calls": calls}} if changed else None
+    return None
+
+
 def on_pre_tool_call(tool_name="", args=None, task_id="", **kwargs):
     try:
-        if not _turn(kwargs, task_id):
+        turn = _turn(kwargs, task_id)
+        calls = _speech_calls(tool_name, args)
+        if not calls:
             return None
-        for call in _speech_calls(tool_name, args):
-            problem = problem_with(call.get("text"))
-            if problem:
-                return {"action": "block", "message": f"This script has {problem}, which doesn't work spoken aloud. "
-                                                      "Rewrite it as short, natural speech and put the detail in your text reply."}
+        if turn and not turn["voice"] and not ASKED_FOR_SPEECH.search(turn["message"]):
+            return {"action": "block", "message": TYPED_BLOCK}
+        if turn and turn["voice"]:
+            for call in calls:
+                problem = problem_with(call.get("text"))
+                if problem:
+                    return {"action": "block", "message": f"This script has {problem}, which doesn't work spoken aloud. "
+                                                          "Rewrite it as short, natural speech and put the detail in your text reply."}
+        return _pin_arguments(tool_name, args, turn["message"] if turn else "")
     except Exception:
-        log.exception("could not check a voice script")
+        log.exception("could not check a speech call")
     return None
 
 
@@ -157,7 +208,7 @@ def on_transform_llm_output(response_text="", session_id="", task_id="", **kwarg
             if turn:
                 for key in [k for k, value in _turns.items() if value is turn]:
                     del _turns[key]
-        if not turn:
+        if not turn or not turn["voice"]:
             return None
         if any(os.path.isfile(path) for path in turn["audio"]):
             return None  # The Fish Audio plugin's own hook adds a tag the model left out.

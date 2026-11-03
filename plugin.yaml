@@ -1,5 +1,5 @@
 name: voice_reply
-version: 0.1.0
+version: 0.2.0
 description: "Answer a voice note with a spoken script, keeping tables and code in text."
 author: terrence0488
 kind: standalone

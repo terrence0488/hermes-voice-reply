@@ -26,6 +26,7 @@ class Base(unittest.TestCase):
     def setUp(self):
         hooks._pending.clear()
         hooks._turns.clear()
+        hooks._voice_sessions.clear()
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.audio = os.path.join(self.tmp.name, "real.ogg")
@@ -93,12 +94,94 @@ class Guard(Base):
     def test_wrapped_call_is_checked(self):
         self.assertEqual(self.blocked("```x```", wrapper=True)["action"], "block")
 
-    def test_typed_turn_is_not_guarded(self):
+    def test_turn_without_record_is_not_guarded(self):
         self.assertIsNone(hooks.on_pre_tool_call("fish_speak", {"text": "```x```"}, "t"))
 
     def test_other_tools_are_ignored(self):
         self.start()
         self.assertIsNone(hooks.on_pre_tool_call("terminal", {"command": "```"}, "t"))
+
+
+class TypedTurns(Base):
+    def typed(self, message, session="s"):
+        return hooks.on_pre_llm_call(session_id=session, task_id="t", platform="telegram", sender_id="42", user_message=message)
+
+    def test_speech_is_blocked_on_a_typed_turn(self):
+        self.typed("another one please")
+        self.assertEqual(hooks.on_pre_tool_call("fish_speak", {"text": "hi"}, "t")["message"], hooks.TYPED_BLOCK)
+
+    def test_wrapped_speech_is_blocked_on_a_typed_turn(self):
+        self.typed("another one")
+        wrapped = {"calls": [{"name": "fish_speak", "arguments": {"text": "hi"}}]}
+        self.assertEqual(hooks.on_pre_tool_call("tool_call", wrapped, "t")["action"], "block")
+
+    def test_quoted_typed_message_is_blocked_too(self):
+        self.typed('"Another one"')
+        self.assertEqual(hooks.on_pre_tool_call("fish_speak", {"text": "hi"}, "t")["action"], "block")
+
+    def test_asking_for_voice_is_allowed(self):
+        for message in ("say that in voice", "read it aloud", "Can you speak this?"):
+            with self.subTest(message):
+                self.typed(message)
+                self.assertNotEqual((hooks.on_pre_tool_call("fish_speak", {"text": "hi"}, "t") or {}).get("action"), "block")
+
+    def test_reminder_only_after_a_voice_turn(self):
+        self.assertIsNone(self.typed("hello"))
+        self.start()
+        self.assertEqual(self.typed("hello")["context"], hooks.TYPED_REMINDER)
+
+    def test_no_reminder_when_asking_for_voice(self):
+        self.start()
+        self.assertIsNone(self.typed("say it"))
+
+    def test_turn_without_sender_is_left_alone(self):
+        self.assertIsNone(hooks.on_pre_llm_call(session_id="s", task_id="t", platform="cli", user_message="x"))
+        self.assertIsNone(hooks.on_pre_tool_call("fish_speak", {"text": "hi"}, "t"))
+
+    def test_typed_turn_gets_no_fallback(self):
+        self.typed("hello")
+        self.assertIsNone(hooks.on_transform_llm_output(response_text="hi", session_id="s", task_id="t"))
+
+
+class Pinning(Base):
+    def setUp(self):
+        super().setUp()
+        original = hooks._configured_speech
+        hooks._configured_speech = lambda: {"model": "free", "voice": "rose"}
+        self.addCleanup(setattr, hooks, "_configured_speech", original)
+
+    def test_chosen_model_and_voice_are_replaced(self):
+        self.start()
+        out = hooks.on_pre_tool_call("fish_speak", {"text": "hi", "model": "paid", "voice": "old"}, "t")
+        self.assertEqual(out["action"], "modify")
+        self.assertEqual((out["args"]["model"], out["args"]["voice"], out["args"]["text"]), ("free", "rose", "hi"))
+
+    def test_wrapped_call_is_replaced(self):
+        self.start()
+        args = {"calls": [{"name": "terminal", "arguments": {"command": "ls"}},
+                          {"name": "fish_speak", "arguments": {"text": "hi", "model": "paid", "voice": "old"}}]}
+        out = hooks.on_pre_tool_call("tool_call", args, "t")
+        self.assertEqual(out["args"]["calls"][0], args["calls"][0])
+        self.assertEqual(out["args"]["calls"][1]["arguments"]["model"], "free")
+
+    def test_call_without_choices_is_untouched(self):
+        self.start()
+        self.assertIsNone(hooks.on_pre_tool_call("fish_speak", {"text": "hi"}, "t"))
+
+    def test_voice_named_in_the_message_is_kept(self):
+        hooks.on_pre_llm_call(session_id="s", task_id="t", platform="telegram", sender_id="42", user_message="say hi in voice abc123")
+        out = hooks.on_pre_tool_call("fish_speak", {"text": "hi", "voice": "abc123", "model": "paid"}, "t")
+        self.assertEqual((out["args"]["voice"], out["args"]["model"]), ("abc123", "free"))
+
+    def test_applies_with_no_turn_record(self):
+        self.assertEqual(hooks.on_pre_tool_call("fish_speak", {"text": "hi", "model": "paid"}, "t")["args"]["model"], "free")
+
+    def test_broken_config_does_not_stop_speech(self):
+        def boom():
+            raise RuntimeError("no")
+        hooks._configured_speech = boom
+        self.start()
+        self.assertIsNone(hooks.on_pre_tool_call("fish_speak", {"text": "hi", "model": "paid"}, "t"))
 
 
 class Finish(Base):
