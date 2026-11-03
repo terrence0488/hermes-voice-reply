@@ -1,0 +1,13 @@
+name: voice_reply
+version: 0.1.0
+description: "Answer a voice note with a spoken script, keeping tables and code in text."
+author: terrence0488
+kind: standalone
+manifest_version: 2
+requires_hermes: ">=0.22.5"
+hooks:
+  - pre_gateway_dispatch
+  - pre_llm_call
+  - pre_tool_call
+  - post_tool_call
+  - transform_llm_output
