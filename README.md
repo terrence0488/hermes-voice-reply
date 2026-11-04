@@ -33,12 +33,32 @@ hermes plugins enable voice_reply
 
 Restart the gateway.
 
+## Different voices by language
+
+Voices can sound better in some languages than others. To choose one per language, add a map to the profile's `config.yaml`:
+
+```yaml
+voice_reply:
+  voices:
+    en: <voice ID>
+    zh: <voice ID>
+    yue: <voice ID>
+    ms: <voice ID>
+```
+
+Keys are language codes without a region. A language not in the map uses your `tts.fish-audio.voice`. A voice ID named in the user's message still wins. Changes apply on the next reply. With no map, nothing changes.
+
+The language comes from the `language` the model passes to `fish_speak`. Models tag Cantonese as `zh`, so the plugin treats text as `yue` if it has `嘅`, `咗`, `喺`, `佢`, `嗰`, `啲`, `冇`, `哋` or `嚟`, or `唔` twice.
+
 ## Limits
 
 - **Direct messages only.** Voice notes in groups are ignored.
 - **The fallback sounds plainer** than a script the model wrote, because no one wrote it for speech.
 - **Asking for voice is a word match.** A typed message with `say` in it, such as "what did he say", is allowed to use voice.
 - **Text is dropped by shape.** Plain text of 160 characters or less goes, so a short written fact the voice left out would be lost. Anything longer, or with code, a table, a list, a URL or a path, stays.
+- **One voice per reply.** A reply mixing languages uses the voice for the language the model tagged.
+- **Short Cantonese can read as Mandarin.** Text with none of those characters gets the `zh` voice.
+- **The voice doesn't choose the language.** The map changes who speaks, not what language the model replies in.
 - **The guard catches shapes, not meaning.** A long spoken list in plain sentences under 110 words passes.
 - **The flag matches by person, not message.** If someone sends a voice note and a typed message close together, the first turn to start takes it.
 - **It calls `fish_speak` by name,** so it depends on the Fish Audio plugin's tool.

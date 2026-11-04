@@ -184,6 +184,74 @@ class Pinning(Base):
         self.assertIsNone(hooks.on_pre_tool_call("fish_speak", {"text": "hi", "model": "paid"}, "t"))
 
 
+class LanguageVoices(Base):
+    def setUp(self):
+        super().setUp()
+        for name, stub in (("_configured_speech", lambda: {"model": "free", "voice": "rose"}),
+                           ("_language_voices", lambda: {"en": "eng", "zh": "man", "yue": "can", "ms": "mal"})):
+            self.addCleanup(setattr, hooks, name, getattr(hooks, name))
+            setattr(hooks, name, stub)
+
+    def voice(self, **call):
+        self.start()
+        out = hooks.on_pre_tool_call("fish_speak", call, "t")
+        return out["args"].get("voice") if out else call.get("voice")
+
+    def test_tag_picks_the_voice(self):
+        self.assertEqual(self.voice(text="hi", language="en", voice="old"), "eng")
+        self.assertEqual(self.voice(text="Ya, saya perasan", language="ms", voice="old"), "mal")
+
+    def test_applies_when_the_model_chose_no_voice(self):
+        self.assertEqual(self.voice(text="hi", language="en"), "eng")
+
+    def test_region_is_ignored(self):
+        self.assertEqual(self.voice(text="hi", language="en-GB"), "eng")
+
+    def test_cantonese_tagged_zh_gets_the_cantonese_voice(self):
+        self.assertEqual(self.voice(text="[平和] 诗人面前分咗两条路", language="zh"), "can")
+
+    def test_cantonese_tags(self):
+        self.assertEqual(self.voice(text="hello", language="zh-HK"), "can")
+
+    def test_mandarin_keeps_the_mandarin_voice(self):
+        self.assertEqual(self.voice(text="[轻松] 以后跟你讲普通话", language="zh"), "man")
+
+    def test_one_hum_is_not_cantonese(self):
+        self.assertEqual(self.voice(text="唔，我想想", language="zh"), "man")
+
+    def test_two_of_them_are(self):
+        self.assertEqual(self.voice(text="唔好唔记得", language="zh"), "can")
+
+    def test_traditional_mandarin_stays_mandarin(self):
+        self.assertEqual(self.voice(text="沒關係", language="zh"), "man")
+
+    def test_chinese_with_no_tag(self):
+        self.assertEqual(self.voice(text="你好"), "man")
+
+    def test_unmapped_language_uses_the_default_voice(self):
+        self.assertEqual(self.voice(text="hola", language="es", voice="old"), "rose")
+
+    def test_correct_voice_is_left_alone(self):
+        self.start()
+        self.assertIsNone(hooks.on_pre_tool_call("fish_speak", {"text": "hi", "language": "en", "voice": "eng"}, "t"))
+
+    def test_voice_named_in_the_message_wins(self):
+        hooks.on_pre_llm_call(session_id="s", task_id="t", platform="telegram", sender_id="42", user_message="use voice abc123")
+        out = hooks.on_pre_tool_call("fish_speak", {"text": "hi", "language": "en", "voice": "abc123"}, "t")
+        self.assertIsNone(out)
+
+    def test_wrapped_call(self):
+        self.start()
+        args = {"calls": [{"name": "fish_speak", "arguments": {"text": "hi", "language": "ms"}}]}
+        out = hooks.on_pre_tool_call("tool_call", args, "t")
+        self.assertEqual(out["args"]["calls"][0]["arguments"]["voice"], "mal")
+
+    def test_no_map_changes_nothing(self):
+        hooks._language_voices = lambda: {}
+        self.start()
+        self.assertIsNone(hooks.on_pre_tool_call("fish_speak", {"text": "hi", "language": "en"}, "t"))
+
+
 class Finish(Base):
     def setUp(self):
         super().setUp()

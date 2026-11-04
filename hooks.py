@@ -31,6 +31,9 @@ Call `fish_speak` once.]"""
 TYPED_REMINDER = "[The user typed this message. Reply in text only, even though earlier replies in this chat were voice. Don't mention this note.]"
 TYPED_BLOCK = "The user typed this message, so reply in text. Use voice only when they ask for it."
 ASKED_FOR_SPEECH = re.compile(r"\b(?:voice|speak|say|aloud|audio|tts|pronounce|narrate|sing)\b", re.I)
+_CANTONESE = re.compile("[嘅咗喺佢嗰啲冇哋嚟]")  # 唔 is counted apart, because Mandarin uses it as a hum. 係 is left out: traditional Mandarin has it.
+_CANTONESE_TAGS = {"yue", "zh-yue", "zh-hk", "zh-mo", "yue-hk", "yue-hant"}
+_CJK = re.compile("[\u4e00-\u9fff]")
 
 _MEDIA = re.compile(r"MEDIA:([^\s\"'\\]+)")
 _MEDIA_LINE = re.compile(r"^[ \t]*(?:\[\[audio_as_voice\]\][ \t]*)?MEDIA:(\S+)[ \t]*$", re.M)
@@ -132,9 +135,39 @@ def _configured_speech():
     return {k: settings[k] for k in ("model", "voice") if isinstance(settings.get(k), str) and settings[k]}
 
 
+def _language_voices():
+    """The owner's `voice_reply.voices` map of language to voice, or an empty dict. Never raises."""
+    try:
+        from hermes_cli.config import load_config
+        voices = (load_config().get("voice_reply") or {}).get("voices") or {}
+        return {str(k).lower(): v for k, v in voices.items() if isinstance(v, str) and v}
+    except Exception:
+        return {}
+
+
+def _language_of(call):
+    """The language of a fish_speak call. Models tag Cantonese as zh, so the characters decide that one."""
+    text = call.get("text") if isinstance(call.get("text"), str) else ""
+    if _CANTONESE.search(text) or text.count("唔") >= 2:
+        return "yue"
+    tag = call.get("language")
+    if isinstance(tag, str) and tag.strip():
+        tag = tag.strip().lower().replace("_", "-")
+        return "yue" if tag in _CANTONESE_TAGS else tag.split("-", 1)[0]
+    return "zh" if _CJK.search(text) else None
+
+
 def _pinned(call, message):
-    """A fish_speak call with the configured model and voice, unless this message named others itself."""
+    """A fish_speak call with the configured model and voice, unless this message named others itself.
+
+    A voice mapped to the call's language beats the default voice, even when the model chose none."""
     wanted = {k: v for k, v in _configured_speech().items() if call.get(k) and call[k] != v and call[k] not in message}
+    by_language = _language_voices().get(_language_of(call))
+    if by_language:
+        wanted.pop("voice", None)
+        chosen = call.get("voice")
+        if chosen != by_language and not (chosen and chosen in message):
+            wanted["voice"] = by_language
     return {**call, **wanted} if wanted else None
 
 
@@ -190,7 +223,9 @@ def on_post_tool_call(tool_name="", args=None, result="", task_id="", **kwargs):
 def _synthesize(text):
     """Make speech with the Fish Audio tool directly. Returns its media tag, or None."""
     from tools.registry import registry
-    outcome = json.loads(registry.dispatch("fish_speak", {"text": text}))
+    call = {"text": text}
+    voice = _language_voices().get(_language_of(call))
+    outcome = json.loads(registry.dispatch("fish_speak", {**call, "voice": voice} if voice else call))
     tag = outcome.get("media_tag") if isinstance(outcome, dict) else None
     return tag if isinstance(tag, str) and _MEDIA.search(tag) else None
 
