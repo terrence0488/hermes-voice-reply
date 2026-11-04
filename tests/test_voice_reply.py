@@ -199,24 +199,55 @@ class Finish(Base):
     def test_typed_turn_is_untouched(self):
         self.assertIsNone(self.finish("hello"))
 
-    def test_real_audio_is_untouched(self):
+    def voice_only(self, out):
+        self.assertEqual(out, f"[[audio_as_voice]]\nMEDIA:{self.audio}")
+
+    def made_audio(self, tool="fish_speak"):
+        args = {"text": "hi"}
+        result = json.dumps({"media_tag": f"MEDIA:{self.audio}"})
+        if tool == "tool_call":
+            args = {"calls": [{"name": "fish_speak", "arguments": {"text": "hi"}}]}
+            result = json.dumps({"results": [{"media_tag": f"MEDIA:{self.audio}"}]})
+        hooks.on_post_tool_call(tool, args, result, "t")
+
+    def test_short_caption_is_dropped(self):
         self.start()
-        hooks.on_post_tool_call("fish_speak", {"text": "hi"}, json.dumps({"media_tag": f"MEDIA:{self.audio}"}), "t")
-        self.assertIsNone(self.finish("Caption"))
+        self.made_audio()
+        self.voice_only(self.finish(f"Doing well, you?\n\n[[audio_as_voice]]\nMEDIA:{self.audio}"))
         self.assertEqual(self.spoken, [])
 
-    def test_wrapped_tool_result_counts(self):
+    def test_caption_without_a_tag_is_dropped(self):
         self.start()
-        hooks.on_post_tool_call("tool_call", {"calls": [{"name": "fish_speak", "arguments": {"text": "hi"}}]},
-                                json.dumps({"results": [{"media_tag": f"MEDIA:{self.audio}"}]}), "t")
-        self.assertIsNone(self.finish("Caption"))
+        self.made_audio("tool_call")
+        self.voice_only(self.finish("Atoms make up everything."))
 
-    def test_missed_voice_speaks_a_simple_reply(self):
+    def test_tag_only_reply_stays_voice_only(self):
+        self.start()
+        self.made_audio()
+        self.voice_only(self.finish(f"[[audio_as_voice]]\nMEDIA:{self.audio}"))
+
+    def test_detail_is_kept(self):
+        for text in ("Here:\n```python\nx = 1\n```", "| a | b |\n|---|---|\n| 1 | 2 |", "- one\n- two", "Use `s[::-1]`.",
+                     "See https://example.com", "word " * 40):
+            with self.subTest(text[:20]):
+                self.start()
+                self.made_audio()
+                self.assertIsNone(self.finish(f"{text}\n[[audio_as_voice]]\nMEDIA:{self.audio}"))
+
+    def test_detail_with_a_fake_tag_gets_the_real_one(self):
+        self.start()
+        self.made_audio()
+        out = self.finish("Use `s[::-1]`.\nMEDIA:/nope/fake.mp3")
+        self.assertIn("`s[::-1]`", out)
+        self.assertIn(self.audio, out)
+        self.assertNotIn("/nope/fake.mp3", out)
+
+    def test_missed_voice_speaks_a_simple_reply_as_voice_only(self):
         self.start()
         out = self.finish("Doing fine, thanks.")
         self.assertEqual(self.spoken, ["Doing fine, thanks."])
         self.assertIn(self.audio, out)
-        self.assertIn("Doing fine", out)
+        self.assertNotIn("Doing fine", out)
 
     def test_missed_voice_with_code_speaks_a_pointer(self):
         self.start()
@@ -230,9 +261,9 @@ class Finish(Base):
         self.assertNotIn("/nope/fake.mp3", out)
         self.assertIn(self.audio, out)
 
-    def test_model_written_real_media_is_kept(self):
+    def test_model_written_real_media_counts_as_audio(self):
         self.start()
-        self.assertIsNone(self.finish(f"Caption\nMEDIA:{self.audio}"))
+        self.voice_only(self.finish(f"Caption\nMEDIA:{self.audio}"))
         self.assertEqual(self.spoken, [])
 
     def test_failed_fallback_says_so_and_keeps_the_text(self):

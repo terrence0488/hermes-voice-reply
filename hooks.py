@@ -16,6 +16,7 @@ VOICE_SESSION_TTL_SECONDS = 86400
 MAX_TRACKED = 200
 SPEECH_TOOLS = {"fish_speak", "text_to_speech"}
 FALLBACK_SIMPLE_MAX_CHARS = 400
+CAPTION_MAX_CHARS = 160
 FALLBACK_DETAIL_LINE = "I've put the details in the text. Take a look."
 FAILED_NOTE = "(Voice didn't go through this time.)"
 
@@ -23,8 +24,8 @@ INSTRUCTION = """[The user spoke this message as a voice note. Reply with voice 
 
 Write a script for talking, not a written answer read aloud: sound like a person talking to a friend, with contractions and short sentences, in the user's language, under about 75 words. Answer only what was asked. Use bracket cues where they fit the feeling, such as [excited], [calm], [chuckling], [sighing], [break]: emotion cues at the start of a sentence, usually one or two per reply. Never put tables, code, JSON, HTML, URLs, file paths, long lists or markdown in the script.
 
-Simple answer: everything is in the voice, plus one short caption line and the `media_tag` on its own line.
-Complex answer, with a table, code, data, steps or links: put that detail in the text. The voice gives the gist and says the detail is in the text.
+Simple answer: everything is in the voice. Your reply is only the `media_tag`, with no other text.
+Complex answer, with a table, list, code, data, steps or links: put that detail in the text, plus the `media_tag`. The voice gives the gist and says the detail is in the text.
 
 Call `fish_speak` once.]"""
 TYPED_REMINDER = "[The user typed this message. Reply in text only, even though earlier replies in this chat were voice. Don't mention this note.]"
@@ -33,6 +34,7 @@ ASKED_FOR_SPEECH = re.compile(r"\b(?:voice|speak|say|aloud|audio|tts|pronounce|n
 
 _MEDIA = re.compile(r"MEDIA:([^\s\"'\\]+)")
 _MEDIA_LINE = re.compile(r"^[ \t]*(?:\[\[audio_as_voice\]\][ \t]*)?MEDIA:(\S+)[ \t]*$", re.M)
+_MEDIA_TAG = re.compile(r"\[\[audio_as_voice\]\]|MEDIA:[^\s\"'\\]+")
 _lock = threading.Lock()
 _pending = {}  # (platform, user id) -> [times voice notes arrived]
 _turns = {}  # session or task id -> turn record
@@ -201,6 +203,11 @@ def _spoken_fallback(reply):
     return FALLBACK_DETAIL_LINE
 
 
+def _needs_text(text):
+    """True when written text adds something the voice can't carry. A short plain caption doesn't."""
+    return bool(text) and (len(text) > CAPTION_MAX_CHARS or "`" in text or problem_with(text) is not None)
+
+
 def on_transform_llm_output(response_text="", session_id="", task_id="", **kwargs):
     try:
         with _lock:
@@ -210,21 +217,26 @@ def on_transform_llm_output(response_text="", session_id="", task_id="", **kwarg
                     del _turns[key]
         if not turn or not turn["voice"]:
             return None
-        if any(os.path.isfile(path) for path in turn["audio"]):
-            return None  # The Fish Audio plugin's own hook adds a tag the model left out.
-        cleaned = _MEDIA_LINE.sub(lambda m: m.group(0) if os.path.isfile(m.group(1)) else "", response_text or "")
-        if any(os.path.isfile(path) for path in _MEDIA.findall(cleaned)):
-            return None if cleaned == response_text else cleaned
-        cleaned = cleaned.replace("[[audio_as_voice]]", "").strip()
+        original = response_text or ""
+        rest = _MEDIA_TAG.sub("", original).strip()
+        written = _MEDIA.findall(original)
+        real = [path for path in [*written, *turn["audio"]] if os.path.isfile(path)]
+        if real:
+            if not _needs_text(rest):
+                return f"[[audio_as_voice]]\nMEDIA:{real[0]}"
+            if all(os.path.isfile(path) for path in written):
+                return None  # The Fish Audio plugin's own hook adds a tag the model left out.
+            return f"{rest}\n[[audio_as_voice]]\nMEDIA:{real[0]}"
         log.warning("voice turn produced no audio; using the fallback")
+        spoken = _spoken_fallback(rest)
         tag = None
         try:
-            tag = _synthesize(_spoken_fallback(cleaned))
+            tag = _synthesize(spoken)
         except Exception:
             log.exception("fallback speech failed")
         if tag:
-            return f"{cleaned}\n{tag}" if cleaned else tag
-        return f"{cleaned}\n\n{FAILED_NOTE}" if cleaned else FAILED_NOTE
+            return tag if spoken == rest or not rest else f"{rest}\n{tag}"
+        return f"{rest}\n\n{FAILED_NOTE}" if rest else FAILED_NOTE
     except Exception:
         log.exception("could not finish a voice turn")
         return None
